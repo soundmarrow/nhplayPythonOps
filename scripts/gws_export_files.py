@@ -38,6 +38,16 @@ FILE_TYPE_ALIASES = {
     "trial-probs": "TriProbs",
 }
 
+FILE_TYPE_IDS = {
+    "Meeting": 1,
+    "RaceCard": 2,
+    "Cycle": 3,
+    "FinalCycle": 4,
+    "Price": 5,
+    "Change": 6,
+    "TriProbs": 7,
+}
+
 SOURCE_TABLES = {
     "all": "dbo.v_gws_files_all",
     "main": "dbo.gws_files",
@@ -49,6 +59,16 @@ def normalize_file_type(value: str) -> str:
     text = value.strip()
     key = re.sub(r"[\s_]+", "-", text.lower())
     return FILE_TYPE_ALIASES.get(key, text)
+
+
+def selected_file_type(args: argparse.Namespace) -> Tuple[int, str]:
+    if args.file_type_id is not None:
+        return args.file_type_id, f"type-{args.file_type_id}"
+    file_type = normalize_file_type(args.file_type)
+    if file_type not in FILE_TYPE_IDS:
+        allowed = ", ".join(FILE_TYPE_IDS)
+        raise SystemExit(f"Unknown --file-type {args.file_type!r}. Use one of: {allowed}, or pass --file-type-id.")
+    return FILE_TYPE_IDS[file_type], file_type
 
 
 def utc_timestamp() -> str:
@@ -134,10 +154,7 @@ def build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
     ]
     params: List[Any] = []
 
-    if args.file_type_id is not None:
-        where.append("f.file_type_id = ?")
-    else:
-        where.append("ft.file_type = ?")
+    where.append("f.file_type_id = ?")
     if args.track_breed:
         where.append("t.track_breed = ?")
     if args.race is not None:
@@ -147,7 +164,7 @@ def build_query(args: argparse.Namespace) -> Tuple[str, List[Any]]:
 SELECT
     f.cycle_id,
     f.file_type_id,
-    ft.file_type,
+    ? AS file_type,
     f.race_date,
     f.track_id,
     t.track_code,
@@ -160,8 +177,6 @@ SELECT
 FROM {source} f
 JOIN dbo.gws_tracks t
     ON t.track_id = f.track_id
-JOIN dbo.gws_file_types ft
-    ON ft.file_type_id = f.file_type_id
 WHERE {" AND ".join(where)}
 ORDER BY f.race_date, f.track_id, f.race, f.sequence_num, f.cycle_id
 """
@@ -169,11 +184,8 @@ ORDER BY f.race_date, f.track_id, f.race, f.sequence_num, f.cycle_id
 
 
 def query_params(args: argparse.Namespace, track_code: str, start_date: date, end_date: date) -> List[Any]:
-    params: List[Any] = [start_date.isoformat(), end_date.isoformat(), track_code]
-    if args.file_type_id is not None:
-        params.append(args.file_type_id)
-    else:
-        params.append(normalize_file_type(args.file_type))
+    file_type_id, file_type_label = selected_file_type(args)
+    params: List[Any] = [file_type_label, start_date.isoformat(), end_date.isoformat(), track_code, file_type_id]
     if args.track_breed:
         params.append(args.track_breed)
     if args.race is not None:
@@ -182,7 +194,7 @@ def query_params(args: argparse.Namespace, track_code: str, start_date: date, en
 
 
 def export_window(conn: Any, args: argparse.Namespace, track_code: str, year: int, start_date: date, end_date: date) -> Dict[str, Any]:
-    file_type_label = normalize_file_type(args.file_type) if args.file_type_id is None else f"type-{args.file_type_id}"
+    _, file_type_label = selected_file_type(args)
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_name = f"{track_code}-{year}-{re.sub(r'[^A-Za-z0-9]+', '', file_type_label)}.zip"
