@@ -15,6 +15,14 @@ SAR-2025-Cycle.zip
 SAR-2025-FinalCycle.zip
 ```
 
+`--track-code` accepts either one code or a comma-separated list. A multi-track run still keeps archives separate:
+
+```text
+SAR-2025-Cycle.zip
+BEL-2025-Cycle.zip
+AQU-2025-Cycle.zip
+```
+
 Inside each archive:
 
 ```text
@@ -25,4 +33,3 @@ metadata.json
 ```
 
 The script streams rows from SQL Server directly into the zip file. It does not create a loose raw-file directory.
-

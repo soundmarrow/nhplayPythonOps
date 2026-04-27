@@ -11,7 +11,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -49,6 +49,17 @@ def normalize_file_type(value: str) -> str:
     text = value.strip()
     key = re.sub(r"[\s_]+", "-", text.lower())
     return FILE_TYPE_ALIASES.get(key, text)
+
+
+def utc_timestamp() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def parse_track_codes(value: str) -> List[str]:
+    codes = [code.strip().upper() for code in value.split(",") if code.strip()]
+    if not codes:
+        raise argparse.ArgumentTypeError("Provide at least one track code")
+    return codes
 
 
 def parse_date(value: str) -> date:
@@ -157,8 +168,8 @@ ORDER BY f.race_date, f.track_id, f.race, f.sequence_num, f.cycle_id
     return sql, params
 
 
-def query_params(args: argparse.Namespace, start_date: date, end_date: date) -> List[Any]:
-    params: List[Any] = [start_date.isoformat(), end_date.isoformat(), args.track_code]
+def query_params(args: argparse.Namespace, track_code: str, start_date: date, end_date: date) -> List[Any]:
+    params: List[Any] = [start_date.isoformat(), end_date.isoformat(), track_code]
     if args.file_type_id is not None:
         params.append(args.file_type_id)
     else:
@@ -170,11 +181,11 @@ def query_params(args: argparse.Namespace, start_date: date, end_date: date) -> 
     return params
 
 
-def export_window(conn: Any, args: argparse.Namespace, year: int, start_date: date, end_date: date) -> Dict[str, Any]:
+def export_window(conn: Any, args: argparse.Namespace, track_code: str, year: int, start_date: date, end_date: date) -> Dict[str, Any]:
     file_type_label = normalize_file_type(args.file_type) if args.file_type_id is None else f"type-{args.file_type_id}"
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    archive_name = f"{args.track_code}-{year}-{re.sub(r'[^A-Za-z0-9]+', '', file_type_label)}.zip"
+    archive_name = f"{track_code}-{year}-{re.sub(r'[^A-Za-z0-9]+', '', file_type_label)}.zip"
     archive_path = output_dir / archive_name
     if archive_path.exists() and not args.overwrite:
         raise SystemExit(f"Archive already exists: {archive_path}. Use --overwrite to replace it.")
@@ -184,12 +195,12 @@ def export_window(conn: Any, args: argparse.Namespace, year: int, start_date: da
         cur.execute("SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED")
 
     sql, _ = build_query(args)
-    cur.execute(sql, query_params(args, start_date, end_date))
+    cur.execute(sql, query_params(args, track_code, start_date, end_date))
 
     manifest: List[Dict[str, Any]] = []
     seen_names: set[str] = set()
     file_count = 0
-    started_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    started_at = utc_timestamp()
 
     if args.count_only:
         while True:
@@ -197,7 +208,7 @@ def export_window(conn: Any, args: argparse.Namespace, year: int, start_date: da
             if not rows:
                 break
             file_count += len(rows)
-        return {"year": year, "archive_path": "", "file_count": file_count}
+        return {"track_code": track_code, "year": year, "archive_path": "", "file_count": file_count}
 
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=args.compress_level) as zf:
         while True:
@@ -227,9 +238,9 @@ def export_window(conn: Any, args: argparse.Namespace, year: int, start_date: da
             print(f"{archive_name}: exported={file_count}", flush=True)
 
         metadata = {
-            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            "created_at": utc_timestamp(),
             "started_at": started_at,
-            "track_code": args.track_code,
+            "track_code": track_code,
             "track_breed": args.track_breed,
             "file_type": file_type_label,
             "file_type_id": args.file_type_id,
@@ -242,7 +253,7 @@ def export_window(conn: Any, args: argparse.Namespace, year: int, start_date: da
         zf.writestr("manifest.json", json.dumps(manifest, indent=2, default=str) + "\n")
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str) + "\n")
 
-    return {"year": year, "archive_path": str(archive_path), "file_count": file_count}
+    return {"track_code": track_code, "year": year, "archive_path": str(archive_path), "file_count": file_count}
 
 
 def run_export(args: argparse.Namespace) -> int:
@@ -251,13 +262,14 @@ def run_export(args: argparse.Namespace) -> int:
     conn.autocommit = True
 
     results = []
-    for year, window_start, window_end in year_windows(args.start_date, args.end_date):
-        results.append(export_window(conn, args, year, window_start, window_end))
+    for track_code in args.track_codes:
+        for year, window_start, window_end in year_windows(args.start_date, args.end_date):
+            results.append(export_window(conn, args, track_code, year, window_start, window_end))
 
     for result in results:
         if result["archive_path"]:
             print(f"archive_path={result['archive_path']}")
-        print(f"year={result['year']} file_count={result['file_count']}")
+        print(f"track_code={result['track_code']} year={result['year']} file_count={result['file_count']}")
     return 0
 
 
@@ -294,13 +306,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  python scripts/gws_export_files.py --env-file .env.dev-write --track-code SAR --year 2025 --file-type Cycle\n"
+            "  python scripts/gws_export_files.py --env-file .env.dev-write --track-code SAR,BEL,AQU --year 2025 --file-type Cycle\n"
             "  python scripts/gws_export_files.py --env-file .env.prod-write --track-code SAR --start-date 2025-07-01 --end-date 2025-07-07 --file-type FinalCycle --background\n"
             "  python scripts/gws_export_files.py --env-file .env.dev-write --track-code SAR --year 2025 --file-type TriProbs --count-only"
         ),
     )
     parser.add_argument("--env-file", required=True, help="Env file with GWS_SQL_* settings")
-    parser.add_argument("--track-code", required=True, help="GWS track code, e.g. SAR")
+    parser.add_argument("--track-code", required=True, help="GWS track code or comma-separated list, e.g. SAR or SAR,BEL,AQU")
     parser.add_argument("--track-breed", default="", help="Optional breed filter, e.g. TB, H, DG")
     parser.add_argument("--year", type=int, help="Export a full calendar year")
     parser.add_argument("--start-date", type=parse_date, help="Inclusive YYYY-MM-DD")
@@ -336,6 +348,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         raise SystemExit("--batch-size must be positive")
     if args.compress_level < 0 or args.compress_level > 9:
         raise SystemExit("--compress-level must be between 0 and 9")
+    args.track_codes = parse_track_codes(args.track_code)
     return args
 
 

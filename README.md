@@ -29,6 +29,12 @@ Export one zip per track, year, and file type:
 python scripts/gws_export_files.py --env-file .env.dev-write --track-code SAR --year 2025 --file-type Cycle
 ```
 
+Multiple tracks can be requested with a comma-separated list. The script creates one archive per track/year/file type:
+
+```bash
+python scripts/gws_export_files.py --env-file .env.dev-write --track-code SAR,BEL,AQU --year 2025 --file-type Cycle
+```
+
 For a custom date range:
 
 ```bash
